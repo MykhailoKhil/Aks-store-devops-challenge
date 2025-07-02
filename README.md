@@ -3,6 +3,7 @@
 This project demonstrates how to deploy the AKS Store Demo application locally on Docker Desktop Kubernetes with HTTPS support using a self-signed TLS certificate and NGINX Ingress.
 
 ---
+# Local deployment 
 
 ## 🚀 Prerequisites
 
@@ -74,4 +75,4 @@ kubectl port-forward svc/ingress-nginx-controller -n ingress-nginx 8443:443
 
 ```
 
-How you can open browuser and open page http://store.example.com/
+How you can open browser and open page http://store.example.com/
