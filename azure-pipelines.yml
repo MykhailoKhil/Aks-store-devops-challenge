@@ -1,0 +1,381 @@
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    include:
+    - terraform/**
+    - kubernetes-manifests/**
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Environment name
+  - name: environment
+    ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+      value: 'prod'
+    ${{ if eq(variables['Build.SourceBranchName'], 'develop') }}:
+      value: 'dev'
+    ${{ if ne(variables['Build.SourceBranchName'], 'main') }}:
+      ${{ if ne(variables['Build.SourceBranchName'], 'develop') }}:
+        value: 'dev'
+  
+  # Terraform directory
+  - name: terraformDirectory
+    value: 'terraform/environments/$(environment)'
+  
+  # Azure service connection
+  - name: azureServiceConnection
+    value: 'azure-service-connection'
+  
+  # Terraform state storage
+  - name: terraformStateResourceGroup
+    value: 'terraform-state-rg'
+  - name: terraformStateStorageAccount
+    value: 'terraformstateaksstore'
+  - name: terraformStateContainer
+    value: 'tfstate'
+  - name: terraformStateKey
+    value: '$(environment).terraform.tfstate'
+  
+  # Docker image variables
+  - name: dockerRegistryServiceConnection
+    value: 'acr-service-connection'
+  - name: imageRepository
+    value: 'aks-store'
+  - name: dockerfilePath
+    value: '**/Dockerfile'
+  - name: tag
+    value: '$(Build.BuildId)'
+
+stages:
+# Stage 1: Validate and Plan Terraform
+- stage: ValidateTerraform
+  displayName: 'Validate Terraform'
+  jobs:
+  - job: Validate
+    displayName: 'Validate'
+    steps:
+    - task: TerraformInstaller@0
+      displayName: 'Install Terraform'
+      inputs:
+        terraformVersion: '1.5.7'
+    
+    - task: AzureCLI@2
+      displayName: 'Azure CLI Login'
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az --version
+          az account show
+    
+    - task: TerraformTaskV4@4
+      displayName: 'Terraform Init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)'
+        backendServiceArm: '$(azureServiceConnection)'
+        backendAzureRmResourceGroupName: '$(terraformStateResourceGroup)'
+        backendAzureRmStorageAccountName: '$(terraformStateStorageAccount)'
+        backendAzureRmContainerName: '$(terraformStateContainer)'
+        backendAzureRmKey: '$(terraformStateKey)'
+    
+    - task: TerraformTaskV4@4
+      displayName: 'Terraform Validate'
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)'
+    
+    - task: TerraformTaskV4@4
+      displayName: 'Terraform Format Check'
+      inputs:
+        provider: 'azurerm'
+        command: 'custom'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)'
+        customCommand: 'fmt -check -recursive'
+        
+    - task: TerraformTaskV4@4
+      displayName: 'Terraform Plan'
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)'
+        environmentServiceNameAzureRM: '$(azureServiceConnection)'
+        commandOptions: '-out=$(System.DefaultWorkingDirectory)/$(terraformDirectory)/terraform.plan'
+    
+    - task: CopyFiles@2
+      displayName: 'Copy Terraform Plan'
+      inputs:
+        SourceFolder: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)'
+        Contents: 'terraform.plan'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Terraform Plan'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'terraform-plan'
+        publishLocation: 'Container'
+
+# Stage 2: Deploy Terraform Infrastructure
+- stage: DeployTerraform
+  displayName: 'Deploy Terraform Infrastructure'
+  dependsOn: ValidateTerraform
+  condition: succeeded()
+  jobs:
+  - deployment: DeployTerraform
+    displayName: 'Deploy Terraform'
+    environment: $(environment)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: '1.5.7'
+          
+          - task: DownloadBuildArtifacts@1
+            displayName: 'Download Terraform Plan'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'terraform-plan'
+              downloadPath: '$(System.ArtifactsDirectory)'
+          
+          - task: CopyFiles@2
+            displayName: 'Copy Terraform Plan to Working Directory'
+            inputs:
+              SourceFolder: '$(System.ArtifactsDirectory)/terraform-plan'
+              Contents: 'terraform.plan'
+              TargetFolder: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)'
+          
+          - task: AzureCLI@2
+            displayName: 'Azure CLI Login'
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az --version
+                az account show
+          
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Init'
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)'
+              backendServiceArm: '$(azureServiceConnection)'
+              backendAzureRmResourceGroupName: '$(terraformStateResourceGroup)'
+              backendAzureRmStorageAccountName: '$(terraformStateStorageAccount)'
+              backendAzureRmContainerName: '$(terraformStateContainer)'
+              backendAzureRmKey: '$(terraformStateKey)'
+          
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Apply'
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)'
+              environmentServiceNameAzureRM: '$(azureServiceConnection)'
+              commandOptions: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)/terraform.plan'
+          
+          # Export Terraform outputs for use in subsequent stages
+          - task: TerraformTaskV4@4
+            displayName: 'Export Terraform Outputs'
+            inputs:
+              provider: 'azurerm'
+              command: 'output'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/$(terraformDirectory)'
+              environmentServiceNameAzureRM: '$(azureServiceConnection)'
+            name: terraformOutput
+          
+          # Set variables from Terraform outputs
+          - script: |
+              echo "##vso[task.setvariable variable=acrName;isOutput=true]$(terraformOutput.acr_name)"
+              echo "##vso[task.setvariable variable=acrLoginServer;isOutput=true]$(terraformOutput.acr_login_server)"
+              echo "##vso[task.setvariable variable=clusterName;isOutput=true]$(terraformOutput.cluster_name)"
+              echo "##vso[task.setvariable variable=resourceGroupName;isOutput=true]$(terraformOutput.resource_group_name)"
+            displayName: 'Set Output Variables'
+            name: setVars
+
+# Stage 3: Build and Push Docker Images
+- stage: BuildImages
+  displayName: 'Build and Push Docker Images'
+  dependsOn: DeployTerraform
+  variables:
+    acrName: $[ stageDependencies.DeployTerraform.DeployTerraform.outputs['setVars.acrName'] ]
+    acrLoginServer: $[ stageDependencies.DeployTerraform.DeployTerraform.outputs['setVars.acrLoginServer'] ]
+    resourceGroupName: $[ stageDependencies.DeployTerraform.DeployTerraform.outputs['setVars.resourceGroupName'] ]
+  jobs:
+  - job: BuildPushImages
+    displayName: 'Build and Push Images'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Azure CLI Login'
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az acr login --name $(acrName)
+    
+    # Build and push store-front
+    - task: Docker@2
+      displayName: 'Build and Push store-front'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)/store-front'
+        command: 'buildAndPush'
+        Dockerfile: 'aks-store-demo-git/src/store-front/Dockerfile'
+        buildContext: 'aks-store-demo-git/src/store-front'
+        tags: |
+          $(tag)
+          latest
+    
+    # Build and push store-admin
+    - task: Docker@2
+      displayName: 'Build and Push store-admin'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)/store-admin'
+        command: 'buildAndPush'
+        Dockerfile: 'aks-store-demo-git/src/store-admin/Dockerfile'
+        buildContext: 'aks-store-demo-git/src/store-admin'
+        tags: |
+          $(tag)
+          latest
+    
+    # Build and push order-service
+    - task: Docker@2
+      displayName: 'Build and Push order-service'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)/order-service'
+        command: 'buildAndPush'
+        Dockerfile: 'aks-store-demo-git/src/order-service/Dockerfile'
+        buildContext: 'aks-store-demo-git/src/order-service'
+        tags: |
+          $(tag)
+          latest
+    
+    # Build and push product-service
+    - task: Docker@2
+      displayName: 'Build and Push product-service'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)/product-service'
+        command: 'buildAndPush'
+        Dockerfile: 'aks-store-demo-git/src/product-service/Dockerfile'
+        buildContext: 'aks-store-demo-git/src/product-service'
+        tags: |
+          $(tag)
+          latest
+    
+    # Build and push makeline-service
+    - task: Docker@2
+      displayName: 'Build and Push makeline-service'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)/makeline-service'
+        command: 'buildAndPush'
+        Dockerfile: 'aks-store-demo-git/src/makeline-service/Dockerfile'
+        buildContext: 'aks-store-demo-git/src/makeline-service'
+        tags: |
+          $(tag)
+          latest
+    
+    # Build and push ai-service if it exists
+    - task: Docker@2
+      displayName: 'Build and Push ai-service'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)/ai-service'
+        command: 'buildAndPush'
+        Dockerfile: 'aks-store-demo-git/src/ai-service/Dockerfile'
+        buildContext: 'aks-store-demo-git/src/ai-service'
+        tags: |
+          $(tag)
+          latest
+      continueOnError: true
+
+# Stage 4: Deploy to AKS
+- stage: DeployToAKS
+  displayName: 'Deploy to AKS'
+  dependsOn: 
+  - DeployTerraform
+  - BuildImages
+  variables:
+    clusterName: $[ stageDependencies.DeployTerraform.DeployTerraform.outputs['setVars.clusterName'] ]
+    resourceGroupName: $[ stageDependencies.DeployTerraform.DeployTerraform.outputs['setVars.resourceGroupName'] ]
+    acrLoginServer: $[ stageDependencies.DeployTerraform.DeployTerraform.outputs['setVars.acrLoginServer'] ]
+  jobs:
+  - deployment: DeployAKS
+    displayName: 'Deploy to AKS'
+    environment: $(environment)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Get AKS Credentials'
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials --resource-group $(resourceGroupName) --name $(clusterName) --overwrite-existing
+          
+          # Install kubectl
+          - task: KubectlInstaller@0
+            displayName: 'Install kubectl'
+            inputs:
+              kubectlVersion: 'latest'
+          
+          # Update Kubernetes manifests with the new image tag
+          - task: Bash@3
+            displayName: 'Update Kubernetes Manifests'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Update image tags in Kubernetes manifests
+                sed -i 's|image:.*store-front.*|image: $(acrLoginServer)/$(imageRepository)/store-front:$(tag)|g' kubernetes-manifests/*.yaml
+                sed -i 's|image:.*store-admin.*|image: $(acrLoginServer)/$(imageRepository)/store-admin:$(tag)|g' kubernetes-manifests/*.yaml
+                sed -i 's|image:.*order-service.*|image: $(acrLoginServer)/$(imageRepository)/order-service:$(tag)|g' kubernetes-manifests/*.yaml
+                sed -i 's|image:.*product-service.*|image: $(acrLoginServer)/$(imageRepository)/product-service:$(tag)|g' kubernetes-manifests/*.yaml
+                sed -i 's|image:.*makeline-service.*|image: $(acrLoginServer)/$(imageRepository)/makeline-service:$(tag)|g' kubernetes-manifests/*.yaml
+                sed -i 's|image:.*ai-service.*|image: $(acrLoginServer)/$(imageRepository)/ai-service:$(tag)|g' kubernetes-manifests/*.yaml
+          
+          # Deploy to AKS
+          - task: Kubernetes@1
+            displayName: 'Deploy to AKS'
+            inputs:
+              connectionType: 'Azure Resource Manager'
+              azureSubscriptionEndpoint: $(azureServiceConnection)
+              azureResourceGroup: $(resourceGroupName)
+              kubernetesCluster: $(clusterName)
+              command: 'apply'
+              useConfigurationFile: true
+              configuration: 'kubernetes-manifests/'
+              secretType: 'dockerRegistry'
+              containerRegistryType: 'Azure Container Registry'
+              azureSubscriptionEndpointForSecrets: $(azureServiceConnection)
+              azureContainerRegistry: $(acrLoginServer)
+          
+          # Verify deployment
+          - task: Kubernetes@1
+            displayName: 'Verify Deployment'
+            inputs:
+              connectionType: 'Azure Resource Manager'
+              azureSubscriptionEndpoint: $(azureServiceConnection)
+              azureResourceGroup: $(resourceGroupName)
+              kubernetesCluster: $(clusterName)
+              command: 'get'
+              arguments: 'pods'
