@@ -1,0 +1,116 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - src/**
+
+variables:
+  # Set environment based on branch
+  - name: environment
+    ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+      value: 'prod'
+    ${{ if ne(variables['Build.SourceBranchName'], 'main') }}:
+      value: 'dev'
+
+  # Azure service connection name (used for AKS)
+  - name: azureServiceConnection
+    value: 'acr-service-connection'
+  
+  # Docker registry service connection name (used for Docker tasks)
+  - name: dockerRegistryServiceConnection
+    value: 'acr-connection'
+
+  # Docker image settings
+  - name: acrName
+    value: 'aksstoredevacr'
+  - name: acrLoginServer
+    value: 'aksstoredevacr.azurecr.io'
+  - name: imageRepository
+    value: 'aks-store'
+  - name: tag
+    value: '$(Build.BuildId)'
+
+stages:
+
+# Stage 1: Build and Push Docker Images
+- stage: Build
+  displayName: 'Build and Push Docker Images'
+  jobs:
+  - job: BuildImages
+    displayName: 'Build and Push Images'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Build and push store-front
+    - task: Docker@2
+      displayName: 'Build and Push store-front'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)/store-front'
+        command: 'buildAndPush'
+        Dockerfile: 'src/store-front/Dockerfile'
+        buildContext: 'src/store-front'
+        tags: |
+          $(tag)
+          latest
+
+    # Build and push order-service
+    - task: Docker@2
+      displayName: 'Build and Push order-service'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)/order-service'
+        command: 'buildAndPush'
+        Dockerfile: 'src/order-service/Dockerfile'
+        buildContext: 'src/order-service'
+        tags: |
+          $(tag)
+          latest
+
+    # Build and push product-service
+    - task: Docker@2
+      displayName: 'Build and Push product-service'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)/product-service'
+        command: 'buildAndPush'
+        Dockerfile: 'src/product-service/Dockerfile'
+        buildContext: 'src/product-service'
+        tags: |
+          $(tag)
+          latest
+
+# Stage 2: Run Tests
+- stage: Test
+  displayName: 'Run Tests'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - job: RunTests
+    displayName: 'Run Unit Tests'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - script: |
+        echo "Running frontend tests"
+        cd src/store-front
+        npm ci
+        npm test
+      displayName: 'Run Frontend Tests'
+      
+    - script: |
+        echo "Running order-service tests"
+        cd src/order-service
+        npm ci
+        npm test
+      displayName: 'Run Order Service Tests'
+
+    - script: |
+        echo "Running product-service tests"
+        cd src/product-service
+        npm ci
+        npm test
+      displayName: 'Run Product Service Tests'
