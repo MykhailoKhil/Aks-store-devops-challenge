@@ -5,22 +5,25 @@ trigger:
       - develop
   paths:
     include:
-    - src/**
+      - src/**
 
 variables:
-  # Environment name
+  # Set environment based on branch
   - name: environment
     ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
       value: 'prod'
-    ${{ if eq(variables['Build.SourceBranchName'], 'develop') }}:
-      value: 'dev'
     ${{ if ne(variables['Build.SourceBranchName'], 'main') }}:
-      ${{ if ne(variables['Build.SourceBranchName'], 'develop') }}:
-        value: 'dev'
-  
-  # Docker image variables
-  - name: dockerRegistryServiceConnection
+      value: 'dev'
+
+  # Azure service connection name (used for AKS)
+  - name: azureServiceConnection
     value: 'acr-service-connection'
+  
+  # Docker registry service connection name (used for Docker tasks)
+  - name: dockerRegistryServiceConnection
+    value: 'acr-connection'
+
+  # Docker image settings
   - name: acrName
     value: 'aksstoredevacr'
   - name: acrLoginServer
@@ -31,6 +34,7 @@ variables:
     value: '$(Build.BuildId)'
 
 stages:
+
 # Stage 1: Build and Push Docker Images
 - stage: Build
   displayName: 'Build and Push Docker Images'
@@ -40,15 +44,6 @@ stages:
     pool:
       vmImage: 'ubuntu-latest'
     steps:
-    - task: AzureCLI@2
-      displayName: 'Azure CLI Login'
-      inputs:
-        azureSubscription: $(azureServiceConnection)
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          az acr login --name $(acrName)
-    
     # Build and push store-front
     - task: Docker@2
       displayName: 'Build and Push store-front'
@@ -61,20 +56,7 @@ stages:
         tags: |
           $(tag)
           latest
-    
-    # Build and push store-admin
-    - task: Docker@2
-      displayName: 'Build and Push store-admin'
-      inputs:
-        containerRegistry: '$(dockerRegistryServiceConnection)'
-        repository: '$(imageRepository)/store-admin'
-        command: 'buildAndPush'
-        Dockerfile: 'src/store-admin/Dockerfile'
-        buildContext: 'src/store-admin'
-        tags: |
-          $(tag)
-          latest
-    
+
     # Build and push order-service
     - task: Docker@2
       displayName: 'Build and Push order-service'
@@ -87,7 +69,7 @@ stages:
         tags: |
           $(tag)
           latest
-    
+
     # Build and push product-service
     - task: Docker@2
       displayName: 'Build and Push product-service'
@@ -100,38 +82,12 @@ stages:
         tags: |
           $(tag)
           latest
-    
-    # Build and push makeline-service
-    - task: Docker@2
-      displayName: 'Build and Push makeline-service'
-      inputs:
-        containerRegistry: '$(dockerRegistryServiceConnection)'
-        repository: '$(imageRepository)/makeline-service'
-        command: 'buildAndPush'
-        Dockerfile: 'src/makeline-service/Dockerfile'
-        buildContext: 'src/makeline-service'
-        tags: |
-          $(tag)
-          latest
-    
-    # Build and push ai-service if it exists
-    - task: Docker@2
-      displayName: 'Build and Push ai-service'
-      inputs:
-        containerRegistry: '$(dockerRegistryServiceConnection)'
-        repository: '$(imageRepository)/ai-service'
-        command: 'buildAndPush'
-        Dockerfile: 'src/ai-service/Dockerfile'
-        buildContext: 'src/ai-service'
-        tags: |
-          $(tag)
-          latest
-      continueOnError: true
 
 # Stage 2: Run Tests
 - stage: Test
   displayName: 'Run Tests'
   dependsOn: Build
+  condition: succeeded()
   jobs:
   - job: RunTests
     displayName: 'Run Unit Tests'
@@ -140,12 +96,21 @@ stages:
     steps:
     - script: |
         echo "Running frontend tests"
-        # Add commands to run frontend tests here
-        # e.g., cd src/store-front && npm ci && npm test
+        cd src/store-front
+        npm ci
+        npm test
       displayName: 'Run Frontend Tests'
       
     - script: |
-        echo "Running backend tests"
-        # Add commands to run backend tests here
-        # e.g., cd src/order-service && npm ci && npm test
-      displayName: 'Run Backend Tests'
+        echo "Running order-service tests"
+        cd src/order-service
+        npm ci
+        npm test
+      displayName: 'Run Order Service Tests'
+
+    - script: |
+        echo "Running product-service tests"
+        cd src/product-service
+        npm ci
+        npm test
+      displayName: 'Run Product Service Tests'
